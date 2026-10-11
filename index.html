@@ -153,9 +153,15 @@
       return o;
     }
 
-    // --- Camera (orbit) ---
-    let camYaw = 0.5, camPitch = 0.4, camDist = 5;
+    // --- Camera (free look + WASD/ZQSD) ---
+    let camYaw = 0.5, camPitch = 0.4;
+    const camPos = [0, 0, 5];
+    const moveSpeed = 0.08;
     let dragging = false, lastX = 0, lastY = 0;
+    const keys = {};
+
+    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keyup', e => keys[e.code] = false);
 
     canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
     window.addEventListener('mouseup', () => dragging = false);
@@ -168,23 +174,40 @@
       lastY = e.clientY;
     });
     canvas.addEventListener('wheel', e => {
-      camDist *= 1 + e.deltaY * 0.001;
-      camDist = Math.max(1.5, Math.min(20, camDist));
+      const fwd = [-Math.sin(camYaw) * Math.cos(camPitch), Math.sin(camPitch), -Math.cos(camYaw) * Math.cos(camPitch)];
+      const d = -e.deltaY * 0.005;
+      camPos[0] += fwd[0] * d; camPos[1] += fwd[1] * d; camPos[2] += fwd[2] * d;
       e.preventDefault();
     }, { passive: false });
 
+    function processMovement() {
+      const forward = [-Math.sin(camYaw), 0, -Math.cos(camYaw)];
+      const right = [Math.cos(camYaw), 0, -Math.sin(camYaw)];
+
+      // W/Z = forward, S = backward
+      if (keys['KeyW'] || keys['KeyZ']) { camPos[0] += forward[0]*moveSpeed; camPos[2] += forward[2]*moveSpeed; }
+      if (keys['KeyS']) { camPos[0] -= forward[0]*moveSpeed; camPos[2] -= forward[2]*moveSpeed; }
+      // D = right, A/Q = left
+      if (keys['KeyD']) { camPos[0] += right[0]*moveSpeed; camPos[2] += right[2]*moveSpeed; }
+      if (keys['KeyA'] || keys['KeyQ']) { camPos[0] -= right[0]*moveSpeed; camPos[2] -= right[2]*moveSpeed; }
+      // Space / Shift = up / down
+      if (keys['Space']) camPos[1] += moveSpeed;
+      if (keys['ShiftLeft'] || keys['ShiftRight']) camPos[1] -= moveSpeed;
+    }
+
     // --- Render loop ---
     function frame() {
+      processMovement();
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-      const eye = [
-        camDist * Math.cos(camPitch) * Math.sin(camYaw),
-        camDist * Math.sin(camPitch),
-        camDist * Math.cos(camPitch) * Math.cos(camYaw),
+      const target = [
+        camPos[0] - Math.sin(camYaw) * Math.cos(camPitch),
+        camPos[1] + Math.sin(camPitch),
+        camPos[2] - Math.cos(camYaw) * Math.cos(camPitch),
       ];
 
       const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.1, 100);
-      const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
+      const view = lookAt(camPos, target, [0, 1, 0]);
       gl.uniformMatrix4fv(uMVP, false, mulMat4(proj, view));
 
       gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0);
