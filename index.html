@@ -174,15 +174,15 @@
       lastY = e.clientY;
     });
     canvas.addEventListener('wheel', e => {
-      const fwd = [-Math.sin(camYaw) * Math.cos(camPitch), Math.sin(camPitch), -Math.cos(camYaw) * Math.cos(camPitch)];
+      const fwd = [Math.sin(camYaw) * Math.cos(camPitch), -Math.sin(camPitch), Math.cos(camYaw) * Math.cos(camPitch)];
       const d = -e.deltaY * 0.005;
       camPos[0] += fwd[0] * d; camPos[1] += fwd[1] * d; camPos[2] += fwd[2] * d;
       e.preventDefault();
     }, { passive: false });
 
     function processMovement() {
-      const forward = [-Math.sin(camYaw), 0, -Math.cos(camYaw)];
-      const right = [Math.cos(camYaw), 0, -Math.sin(camYaw)];
+      const forward = [Math.sin(camYaw), 0, Math.cos(camYaw)];
+      const right = [-Math.cos(camYaw), 0, Math.sin(camYaw)];
 
       // W/Z = forward, S = backward
       if (keys['KeyW'] || keys['KeyZ']) { camPos[0] += forward[0]*moveSpeed; camPos[2] += forward[2]*moveSpeed; }
