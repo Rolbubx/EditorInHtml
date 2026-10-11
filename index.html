@@ -85,6 +85,140 @@
     const uLightDir = gl.getUniformLocation(prog, 'uLightDir');
     const uViewPos = gl.getUniformLocation(prog, 'uViewPos');
 
+    // --- Sky shader (Rayleigh + Mie atmospheric scattering) ---
+    const skyVS = `
+      attribute vec2 aQuad;
+      varying vec2 vUV;
+      void main() {
+        vUV = aQuad;
+        gl_Position = vec4(aQuad, 0.999, 1.0);
+      }
+    `;
+    const skyFS = `
+      precision mediump float;
+      varying vec2 vUV;
+      uniform vec3 uSunDir;
+      uniform mat4 uInvVP;
+
+      #define PI 3.14159265
+      #define SAMPLES 8
+      #define SAMPLES_LIGHT 4
+
+      vec3 rayleighCoeff = vec3(5.5e-6, 13.0e-6, 22.4e-6);
+      float mieCoeff = 21.0e-6;
+      float rayleighH = 8000.0;
+      float mieH = 1200.0;
+      float earthR = 6371000.0;
+      float atmosR = 6471000.0;
+      float mieG = 0.76;
+
+      vec2 raySphere(vec3 ro, vec3 rd, float r) {
+        float b = dot(ro, rd);
+        float c = dot(ro, ro) - r * r;
+        float d = b * b - c;
+        if (d < 0.0) return vec2(1e5, -1e5);
+        d = sqrt(d);
+        return vec2(-b - d, -b + d);
+      }
+
+      vec3 atmosphere(vec3 rd, vec3 sunDir) {
+        vec3 origin = vec3(0.0, earthR + 2.0, 0.0);
+        vec2 t = raySphere(origin, rd, atmosR);
+        if (t.x > t.y) return vec3(0.0);
+        t.x = max(t.x, 0.0);
+        float stepSize = (t.y - t.x) / float(SAMPLES);
+        float tCurrent = t.x;
+        vec3 totalR = vec3(0.0);
+        vec3 totalM = vec3(0.0);
+        float optDepthR = 0.0;
+        float optDepthM = 0.0;
+
+        for (int i = 0; i < SAMPLES; i++) {
+          vec3 pos = origin + rd * (tCurrent + stepSize * 0.5);
+          float h = length(pos) - earthR;
+          float hr = exp(-h / rayleighH) * stepSize;
+          float hm = exp(-h / mieH) * stepSize;
+          optDepthR += hr;
+          optDepthM += hm;
+
+          vec2 tSun = raySphere(pos, sunDir, atmosR);
+          float stepSun = tSun.y / float(SAMPLES_LIGHT);
+          float optDepthLR = 0.0;
+          float optDepthLM = 0.0;
+          bool hit = false;
+          for (int j = 0; j < SAMPLES_LIGHT; j++) {
+            vec3 posS = pos + sunDir * ((float(j) + 0.5) * stepSun);
+            float hS = length(posS) - earthR;
+            if (hS < 0.0) { hit = true; break; }
+            optDepthLR += exp(-hS / rayleighH) * stepSun;
+            optDepthLM += exp(-hS / mieH) * stepSun;
+          }
+          if (!hit) {
+            vec3 tau = rayleighCoeff * (optDepthR + optDepthLR) + mieCoeff * 1.1 * (optDepthM + optDepthLM);
+            vec3 atten = exp(-tau);
+            totalR += hr * atten;
+            totalM += hm * atten;
+          }
+          tCurrent += stepSize;
+        }
+
+        float mu = dot(rd, sunDir);
+        float phaseR = 3.0 / (16.0 * PI) * (1.0 + mu * mu);
+        float phaseM = 3.0 / (8.0 * PI) * ((1.0 - mieG * mieG) * (1.0 + mu * mu)) /
+                        ((2.0 + mieG * mieG) * pow(1.0 + mieG * mieG - 2.0 * mieG * mu, 1.5));
+
+        return 20.0 * (phaseR * rayleighCoeff * totalR + phaseM * mieCoeff * totalM);
+      }
+
+      void main() {
+        vec4 clip = vec4(vUV, 1.0, 1.0);
+        vec4 world = uInvVP * clip;
+        vec3 rd = normalize(world.xyz / world.w);
+        vec3 sunDir = normalize(uSunDir);
+        vec3 color = atmosphere(rd, sunDir);
+        color = pow(color, vec3(1.0 / 2.2));
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
+
+    const skyProg = gl.createProgram();
+    gl.attachShader(skyProg, compileShader(skyVS, gl.VERTEX_SHADER));
+    gl.attachShader(skyProg, compileShader(skyFS, gl.FRAGMENT_SHADER));
+    gl.linkProgram(skyProg);
+
+    const skyQuadBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, skyQuadBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+    const skySunDir = gl.getUniformLocation(skyProg, 'uSunDir');
+    const skyInvVP = gl.getUniformLocation(skyProg, 'uInvVP');
+    const skyQuadAttr = gl.getAttribLocation(skyProg, 'aQuad');
+
+    function invertMat4(m) {
+      const inv = new Float32Array(16);
+      inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+      inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+      inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+      inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+      inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+      inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+      inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+      inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+      inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+      inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+      inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+      inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+      inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
+      inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
+      inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
+      inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
+      const det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+      if (Math.abs(det) < 1e-10) return identity();
+      const id = 1.0 / det;
+      for (let i = 0; i < 16; i++) inv[i] *= id;
+      return inv;
+    }
+
     // --- Cube geometry with normals ---
     const faceColors = [
       [0.9, 0.25, 0.2], [0.2, 0.8, 0.3], [0.2, 0.4, 0.9],
@@ -270,11 +404,29 @@
         camPos[2] - Math.cos(camYaw) * Math.cos(camPitch),
       ];
 
+      const sunDir = [0.5, 0.35, 0.3];
+
       const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.1, 200);
       const view = lookAt(camPos, target, [0, 1, 0]);
       const vp = mulMat4(proj, view);
+
+      // Draw sky
+      gl.depthMask(false);
+      gl.useProgram(skyProg);
+      gl.bindBuffer(gl.ARRAY_BUFFER, skyQuadBuf);
+      gl.enableVertexAttribArray(skyQuadAttr);
+      gl.vertexAttribPointer(skyQuadAttr, 2, gl.FLOAT, false, 0, 0);
+      if (aNormal >= 0) gl.disableVertexAttribArray(aNormal);
+      if (aColor >= 0) gl.disableVertexAttribArray(aColor);
+      gl.uniformMatrix4fv(skyInvVP, false, invertMat4(vp));
+      gl.uniform3f(skySunDir, sunDir[0], sunDir[1], sunDir[2]);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.depthMask(true);
+
+      // Scene objects
+      gl.useProgram(prog);
       gl.uniformMatrix4fv(uVP, false, vp);
-      gl.uniform3f(uLightDir, 0.5, 0.8, 0.3);
+      gl.uniform3fv(uLightDir, sunDir);
       gl.uniform3f(uViewPos, camPos[0], camPos[1], camPos[2]);
 
       // Draw grid
