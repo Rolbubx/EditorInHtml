@@ -14,7 +14,7 @@
   <canvas id="gl"></canvas>
   <script>
     const canvas = document.getElementById('gl');
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', { antialias: true });
 
     function resize() {
       canvas.width = window.innerWidth;
@@ -24,7 +24,7 @@
     window.addEventListener('resize', resize);
     resize();
 
-    // --- Shaders ---
+    // --- Scene shaders ---
     const vsSource = `
       attribute vec3 aPos;
       attribute vec3 aNormal;
@@ -52,40 +52,23 @@
       void main() {
         vec3 n = normalize(vNormal);
         vec3 l = normalize(uLightDir);
-        float ambient = 0.15;
+        vec3 skyAmbient = vec3(0.30, 0.35, 0.45);
+        vec3 sunColor = vec3(1.0, 0.92, 0.78);
+        float hemi = 0.5 + 0.5 * n.y;
+        vec3 ambient = mix(vec3(0.10, 0.09, 0.08), skyAmbient, hemi);
         float diff = max(dot(n, l), 0.0);
         vec3 viewDir = normalize(uViewPos - vWorldPos);
         vec3 halfDir = normalize(l + viewDir);
-        float spec = pow(max(dot(n, halfDir), 0.0), 32.0);
-        vec3 color = vColor * (ambient + diff * 0.75) + vec3(1.0) * spec * 0.3;
+        float spec = pow(max(dot(n, halfDir), 0.0), 48.0);
+        vec3 color = vColor * (ambient + sunColor * diff * 0.9) + sunColor * spec * 0.35;
+        float dist = length(uViewPos - vWorldPos);
+        float fog = 1.0 - exp(-dist * 0.012);
+        color = mix(color, vec3(0.62, 0.7, 0.8), fog);
         gl_FragColor = vec4(color, 1.0);
       }
     `;
 
-    function compileShader(src, type) {
-      const s = gl.createShader(type);
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-        throw new Error(gl.getShaderInfoLog(s));
-      return s;
-    }
-
-    const prog = gl.createProgram();
-    gl.attachShader(prog, compileShader(vsSource, gl.VERTEX_SHADER));
-    gl.attachShader(prog, compileShader(fsSource, gl.FRAGMENT_SHADER));
-    gl.linkProgram(prog);
-    gl.useProgram(prog);
-
-    const aPos = gl.getAttribLocation(prog, 'aPos');
-    const aNormal = gl.getAttribLocation(prog, 'aNormal');
-    const aColor = gl.getAttribLocation(prog, 'aColor');
-    const uModel = gl.getUniformLocation(prog, 'uModel');
-    const uVP = gl.getUniformLocation(prog, 'uVP');
-    const uLightDir = gl.getUniformLocation(prog, 'uLightDir');
-    const uViewPos = gl.getUniformLocation(prog, 'uViewPos');
-
-    // --- Sky shader (Rayleigh + Mie atmospheric scattering) ---
+    // --- Sky shaders (Rayleigh + Mie atmospheric scattering) ---
     const skyVS = `
       attribute vec2 aQuad;
       varying vec2 vUV;
@@ -95,22 +78,26 @@
       }
     `;
     const skyFS = `
-      precision mediump float;
+      precision highp float;
       varying vec2 vUV;
       uniform vec3 uSunDir;
-      uniform mat4 uInvVP;
+      uniform vec3 uFwd;
+      uniform vec3 uRight;
+      uniform vec3 uUp;
+      uniform float uTanHalf;
+      uniform float uAspect;
 
       #define PI 3.14159265
-      #define SAMPLES 8
+      #define SAMPLES 12
       #define SAMPLES_LIGHT 4
 
-      vec3 rayleighCoeff = vec3(5.5e-6, 13.0e-6, 22.4e-6);
-      float mieCoeff = 21.0e-6;
-      float rayleighH = 8000.0;
-      float mieH = 1200.0;
-      float earthR = 6371000.0;
-      float atmosR = 6471000.0;
-      float mieG = 0.76;
+      const vec3 rayleighCoeff = vec3(5.5e-6, 13.0e-6, 22.4e-6);
+      const float mieCoeff = 21.0e-6;
+      const float rayleighH = 8000.0;
+      const float mieH = 1200.0;
+      const float earthR = 6371000.0;
+      const float atmosR = 6471000.0;
+      const float mieG = 0.76;
 
       vec2 raySphere(vec3 ro, vec3 rd, float r) {
         float b = dot(ro, rd);
@@ -122,7 +109,8 @@
       }
 
       vec3 atmosphere(vec3 rd, vec3 sunDir) {
-        vec3 origin = vec3(0.0, earthR + 2.0, 0.0);
+        vec3 origin = vec3(0.0, earthR + 1.0, 0.0);
+        if (raySphere(origin, rd, earthR).x > 0.0) rd = normalize(vec3(rd.x, 0.0, rd.z) + vec3(0.0, 0.0, 1e-5));
         vec2 t = raySphere(origin, rd, atmosR);
         if (t.x > t.y) return vec3(0.0);
         t.x = max(t.x, 0.0);
@@ -171,58 +159,56 @@
       }
 
       void main() {
-        vec4 clip = vec4(vUV, 1.0, 1.0);
-        vec4 world = uInvVP * clip;
-        vec3 rd = normalize(world.xyz / world.w);
-        vec3 sunDir = normalize(uSunDir);
-        vec3 color = atmosphere(rd, sunDir);
+        vec3 rd = normalize(uFwd + vUV.x * uAspect * uTanHalf * uRight + vUV.y * uTanHalf * uUp);
+        vec3 color = atmosphere(rd, normalize(uSunDir));
         color = pow(color, vec3(1.0 / 2.2));
         gl_FragColor = vec4(color, 1.0);
       }
     `;
 
-    const skyProg = gl.createProgram();
-    gl.attachShader(skyProg, compileShader(skyVS, gl.VERTEX_SHADER));
-    gl.attachShader(skyProg, compileShader(skyFS, gl.FRAGMENT_SHADER));
-    gl.linkProgram(skyProg);
+    function compileShader(src, type) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    }
+
+    function linkProgram(vsSrc, fsSrc) {
+      const p = gl.createProgram();
+      gl.attachShader(p, compileShader(vsSrc, gl.VERTEX_SHADER));
+      gl.attachShader(p, compileShader(fsSrc, gl.FRAGMENT_SHADER));
+      gl.linkProgram(p);
+      return p;
+    }
+
+    const prog = linkProgram(vsSource, fsSource);
+    const aPos = gl.getAttribLocation(prog, 'aPos');
+    const aNormal = gl.getAttribLocation(prog, 'aNormal');
+    const aColor = gl.getAttribLocation(prog, 'aColor');
+    const uModel = gl.getUniformLocation(prog, 'uModel');
+    const uVP = gl.getUniformLocation(prog, 'uVP');
+    const uLightDir = gl.getUniformLocation(prog, 'uLightDir');
+    const uViewPos = gl.getUniformLocation(prog, 'uViewPos');
+
+    const skyProg = linkProgram(skyVS, skyFS);
+    const skyAQuad = gl.getAttribLocation(skyProg, 'aQuad');
+    const skySunDir = gl.getUniformLocation(skyProg, 'uSunDir');
+    const skyFwd = gl.getUniformLocation(skyProg, 'uFwd');
+    const skyRight = gl.getUniformLocation(skyProg, 'uRight');
+    const skyUp = gl.getUniformLocation(skyProg, 'uUp');
+    const skyTanHalf = gl.getUniformLocation(skyProg, 'uTanHalf');
+    const skyAspect = gl.getUniformLocation(skyProg, 'uAspect');
 
     const skyQuadBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, skyQuadBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
 
-    const skySunDir = gl.getUniformLocation(skyProg, 'uSunDir');
-    const skyInvVP = gl.getUniformLocation(skyProg, 'uInvVP');
-    const skyQuadAttr = gl.getAttribLocation(skyProg, 'aQuad');
-
-    function invertMat4(m) {
-      const inv = new Float32Array(16);
-      inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
-      inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
-      inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
-      inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
-      inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
-      inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
-      inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
-      inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
-      inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
-      inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
-      inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
-      inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
-      inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
-      inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
-      inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
-      inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
-      const det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
-      if (Math.abs(det) < 1e-10) return identity();
-      const id = 1.0 / det;
-      for (let i = 0; i < 16; i++) inv[i] *= id;
-      return inv;
-    }
-
-    // --- Cube geometry with normals ---
+    // --- Geometry: vertices are [x y z, nx ny nz, r g b] ---
     const faceColors = [
-      [0.9, 0.25, 0.2], [0.2, 0.8, 0.3], [0.2, 0.4, 0.9],
-      [0.95, 0.8, 0.15], [0.8, 0.25, 0.85], [0.15, 0.85, 0.85],
+      [0.9, 0.3, 0.25], [0.3, 0.8, 0.35], [0.3, 0.5, 0.95],
+      [0.95, 0.8, 0.2], [0.8, 0.35, 0.9], [0.2, 0.85, 0.85],
     ];
     const faceNormals = [
       [0,0,1], [0,0,-1], [0,1,0], [0,-1,0], [1,0,0], [-1,0,0],
@@ -240,9 +226,7 @@
     const cubeIndices = [];
     for (let f = 0; f < 6; f++) {
       const c = faceColors[f], n = faceNormals[f];
-      for (let v = 0; v < 4; v++) {
-        cubeVerts.push(...faceVerts[f][v], ...n, ...c);
-      }
+      for (let v = 0; v < 4; v++) cubeVerts.push(...faceVerts[f][v], ...n, ...c);
       const o = f * 4;
       cubeIndices.push(o, o+1, o+2, o, o+2, o+3);
     }
@@ -250,39 +234,52 @@
     const cubeVBO = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeVerts), gl.STATIC_DRAW);
-
     const cubeIBO = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(cubeIndices), gl.STATIC_DRAW);
 
-    // --- Grid geometry ---
+    // Ground plane: large dark-slate quad at y = -1
+    const G = 400;
+    const groundVerts = [
+      -G,-1,-G, 0,1,0, 0.22,0.23,0.25,
+       G,-1,-G, 0,1,0, 0.22,0.23,0.25,
+       G,-1, G, 0,1,0, 0.22,0.23,0.25,
+      -G,-1,-G, 0,1,0, 0.22,0.23,0.25,
+       G,-1, G, 0,1,0, 0.22,0.23,0.25,
+      -G,-1, G, 0,1,0, 0.22,0.23,0.25,
+    ];
+    const groundVBO = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, groundVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(groundVerts), gl.STATIC_DRAW);
+
+    // Grid lines sit slightly above the ground to avoid z-fighting
     const gridVerts = [];
-    const gridSize = 20, gridStep = 1;
-    for (let i = -gridSize; i <= gridSize; i += gridStep) {
-      const bright = (i === 0) ? 0.4 : 0.15;
-      gridVerts.push(i, 0, -gridSize, 0, 1, 0, bright, bright, bright);
-      gridVerts.push(i, 0,  gridSize, 0, 1, 0, bright, bright, bright);
-      gridVerts.push(-gridSize, 0, i, 0, 1, 0, bright, bright, bright);
-      gridVerts.push( gridSize, 0, i, 0, 1, 0, bright, bright, bright);
+    const gridSize = 20;
+    for (let i = -gridSize; i <= gridSize; i++) {
+      const b = (i === 0) ? 0.7 : 0.4;
+      gridVerts.push(i, -0.998, -gridSize, 0, 1, 0, b, b, b);
+      gridVerts.push(i, -0.998,  gridSize, 0, 1, 0, b, b, b);
+      gridVerts.push(-gridSize, -0.998, i, 0, 1, 0, b, b, b);
+      gridVerts.push( gridSize, -0.998, i, 0, 1, 0, b, b, b);
     }
     const gridVBO = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, gridVBO);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(gridVerts), gl.STATIC_DRAW);
     const gridVertCount = gridVerts.length / 9;
 
-    const stride = 9 * 4;
-
-    function bindAttribs() {
+    const STRIDE = 9 * 4;
+    function bindSceneAttribs(vbo) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
       gl.enableVertexAttribArray(aPos);
-      gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+      gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, STRIDE, 0);
       gl.enableVertexAttribArray(aNormal);
-      gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, stride, 12);
+      gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, STRIDE, 12);
       gl.enableVertexAttribArray(aColor);
-      gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, stride, 24);
+      gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, STRIDE, 24);
     }
 
     gl.enable(gl.DEPTH_TEST);
-    gl.clearColor(0.06, 0.06, 0.1, 1);
+    gl.clearColor(0.0, 0.0, 0.0, 1);
 
     // --- Math helpers ---
     function identity() { const m = new Float32Array(16); m[0]=m[5]=m[10]=m[15]=1; return m; }
@@ -312,7 +309,7 @@
       const sz = up[0]*z[1] - up[1]*z[0];
       len = 1 / Math.hypot(sx, sy, sz);
       const s = [sx*len, sy*len, sz*len];
-      const u = [s[1]*z[2]-s[2]*z[1], s[2]*z[0]-s[0]*z[2], s[0]*z[1]-s[1]*z[0]];
+      const u = [z[1]*s[2]-z[2]*s[1], z[2]*s[0]-z[0]*s[2], z[0]*s[1]-z[1]*s[0]];
       const m = new Float32Array(16);
       m[0]=s[0]; m[4]=s[1]; m[8]=s[2];
       m[1]=u[0]; m[5]=u[1]; m[9]=u[2];
@@ -321,7 +318,7 @@
       m[13]=-(u[0]*eye[0]+u[1]*eye[1]+u[2]*eye[2]);
       m[14]=-(z[0]*eye[0]+z[1]*eye[1]+z[2]*eye[2]);
       m[15]=1;
-      return m;
+      return { m, s, u, z };
     }
 
     function mulMat4(a, b) {
@@ -338,6 +335,7 @@
     const velocity = [0, 0, 0];
     const accel = 12.0;
     const friction = 6.0;
+    const FOV = Math.PI / 4;
     let dragging = false, lastX = 0, lastY = 0;
     const keys = {};
     let lastTime = performance.now();
@@ -349,8 +347,8 @@
     window.addEventListener('mouseup', () => dragging = false);
     window.addEventListener('mousemove', e => {
       if (!dragging) return;
-      camYaw += (e.clientX - lastX) * 0.005;
-      camPitch += (e.clientY - lastY) * 0.005;
+      camYaw -= (e.clientX - lastX) * 0.005;
+      camPitch -= (e.clientY - lastY) * 0.005;
       camPitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, camPitch));
       lastX = e.clientX;
       lastY = e.clientY;
@@ -392,11 +390,12 @@
     }
 
     // --- Render loop ---
+    const sunDir = [0.5, 0.35, 0.3];
+
     function frame(now) {
       const dt = Math.min((now - lastTime) / 1000, 0.05);
       lastTime = now;
       processMovement(dt);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
       const target = [
         camPos[0] - Math.sin(camYaw) * Math.cos(camPitch),
@@ -404,42 +403,46 @@
         camPos[2] - Math.cos(camYaw) * Math.cos(camPitch),
       ];
 
-      const sunDir = [0.5, 0.35, 0.3];
-
-      const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.1, 200);
-      const view = lookAt(camPos, target, [0, 1, 0]);
+      const aspect = canvas.width / canvas.height;
+      const proj = perspective(FOV, aspect, 0.1, 1000);
+      const { m: view, s, u, z } = lookAt(camPos, target, [0, 1, 0]);
       const vp = mulMat4(proj, view);
+      const fwd = [-z[0], -z[1], -z[2]];
 
-      // Draw sky
-      gl.depthMask(false);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      // Sky
+      gl.disable(gl.DEPTH_TEST);
       gl.useProgram(skyProg);
       gl.bindBuffer(gl.ARRAY_BUFFER, skyQuadBuf);
-      gl.enableVertexAttribArray(skyQuadAttr);
-      gl.vertexAttribPointer(skyQuadAttr, 2, gl.FLOAT, false, 0, 0);
-      if (aNormal >= 0) gl.disableVertexAttribArray(aNormal);
-      if (aColor >= 0) gl.disableVertexAttribArray(aColor);
-      gl.uniformMatrix4fv(skyInvVP, false, invertMat4(vp));
-      gl.uniform3f(skySunDir, sunDir[0], sunDir[1], sunDir[2]);
+      gl.enableVertexAttribArray(skyAQuad);
+      gl.vertexAttribPointer(skyAQuad, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform3fv(skySunDir, sunDir);
+      gl.uniform3fv(skyFwd, fwd);
+      gl.uniform3fv(skyRight, s);
+      gl.uniform3fv(skyUp, u);
+      gl.uniform1f(skyTanHalf, Math.tan(FOV / 2));
+      gl.uniform1f(skyAspect, aspect);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      gl.depthMask(true);
+      gl.enable(gl.DEPTH_TEST);
+      gl.disableVertexAttribArray(skyAQuad);
 
-      // Scene objects
+      // Scene
       gl.useProgram(prog);
       gl.uniformMatrix4fv(uVP, false, vp);
       gl.uniform3fv(uLightDir, sunDir);
       gl.uniform3f(uViewPos, camPos[0], camPos[1], camPos[2]);
 
-      // Draw grid
-      gl.bindBuffer(gl.ARRAY_BUFFER, gridVBO);
-      bindAttribs();
-      gl.uniformMatrix4fv(uModel, false, translate(0, -1, 0));
+      gl.uniformMatrix4fv(uModel, false, identity());
+      bindSceneAttribs(groundVBO);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      bindSceneAttribs(gridVBO);
       gl.drawArrays(gl.LINES, 0, gridVertCount);
 
-      // Draw cube
-      gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
-      bindAttribs();
       gl.uniformMatrix4fv(uModel, false, translate(0, 0, 0));
+      bindSceneAttribs(cubeVBO);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
       gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0);
 
       requestAnimationFrame(frame);
