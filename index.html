@@ -168,7 +168,7 @@
     window.addEventListener('mousemove', e => {
       if (!dragging) return;
       camYaw += (e.clientX - lastX) * 0.008;
-      camPitch -= (e.clientY - lastY) * 0.008;
+      camPitch += (e.clientY - lastY) * 0.008;
       camPitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, camPitch));
       lastX = e.clientX;
       lastY = e.clientY;
