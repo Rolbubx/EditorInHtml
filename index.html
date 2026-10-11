@@ -27,19 +27,38 @@
     // --- Shaders ---
     const vsSource = `
       attribute vec3 aPos;
+      attribute vec3 aNormal;
       attribute vec3 aColor;
-      uniform mat4 uMVP;
+      uniform mat4 uModel;
+      uniform mat4 uVP;
       varying vec3 vColor;
+      varying vec3 vNormal;
+      varying vec3 vWorldPos;
       void main() {
+        vec4 world = uModel * vec4(aPos, 1.0);
+        vWorldPos = world.xyz;
+        vNormal = mat3(uModel) * aNormal;
         vColor = aColor;
-        gl_Position = uMVP * vec4(aPos, 1.0);
+        gl_Position = uVP * world;
       }
     `;
     const fsSource = `
       precision mediump float;
       varying vec3 vColor;
+      varying vec3 vNormal;
+      varying vec3 vWorldPos;
+      uniform vec3 uLightDir;
+      uniform vec3 uViewPos;
       void main() {
-        gl_FragColor = vec4(vColor, 1.0);
+        vec3 n = normalize(vNormal);
+        vec3 l = normalize(uLightDir);
+        float ambient = 0.15;
+        float diff = max(dot(n, l), 0.0);
+        vec3 viewDir = normalize(uViewPos - vWorldPos);
+        vec3 halfDir = normalize(l + viewDir);
+        float spec = pow(max(dot(n, halfDir), 0.0), 32.0);
+        vec3 color = vColor * (ambient + diff * 0.75) + vec3(1.0) * spec * 0.3;
+        gl_FragColor = vec4(color, 1.0);
       }
     `;
 
@@ -59,60 +78,86 @@
     gl.useProgram(prog);
 
     const aPos = gl.getAttribLocation(prog, 'aPos');
+    const aNormal = gl.getAttribLocation(prog, 'aNormal');
     const aColor = gl.getAttribLocation(prog, 'aColor');
-    const uMVP = gl.getUniformLocation(prog, 'uMVP');
+    const uModel = gl.getUniformLocation(prog, 'uModel');
+    const uVP = gl.getUniformLocation(prog, 'uVP');
+    const uLightDir = gl.getUniformLocation(prog, 'uLightDir');
+    const uViewPos = gl.getUniformLocation(prog, 'uViewPos');
 
-    // --- Cube geometry ---
-    // Each face: 2 triangles, unique colors per face
+    // --- Cube geometry with normals ---
     const faceColors = [
-      [1, 0, 0], [0, 1, 0], [0, 0, 1],
-      [1, 1, 0], [1, 0, 1], [0, 1, 1],
+      [0.9, 0.25, 0.2], [0.2, 0.8, 0.3], [0.2, 0.4, 0.9],
+      [0.95, 0.8, 0.15], [0.8, 0.25, 0.85], [0.15, 0.85, 0.85],
+    ];
+    const faceNormals = [
+      [0,0,1], [0,0,-1], [0,1,0], [0,-1,0], [1,0,0], [-1,0,0],
     ];
     const faceVerts = [
-      // Front
-      [-1,-1, 1], [ 1,-1, 1], [ 1, 1, 1], [-1, 1, 1],
-      // Back
-      [ 1,-1,-1], [-1,-1,-1], [-1, 1,-1], [ 1, 1,-1],
-      // Top
-      [-1, 1, 1], [ 1, 1, 1], [ 1, 1,-1], [-1, 1,-1],
-      // Bottom
-      [-1,-1,-1], [ 1,-1,-1], [ 1,-1, 1], [-1,-1, 1],
-      // Right
-      [ 1,-1, 1], [ 1,-1,-1], [ 1, 1,-1], [ 1, 1, 1],
-      // Left
-      [-1,-1,-1], [-1,-1, 1], [-1, 1, 1], [-1, 1,-1],
+      [[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]],
+      [[1,-1,-1],[-1,-1,-1],[-1,1,-1],[1,1,-1]],
+      [[-1,1,1],[1,1,1],[1,1,-1],[-1,1,-1]],
+      [[-1,-1,-1],[1,-1,-1],[1,-1,1],[-1,-1,1]],
+      [[1,-1,1],[1,-1,-1],[1,1,-1],[1,1,1]],
+      [[-1,-1,-1],[-1,-1,1],[-1,1,1],[-1,1,-1]],
     ];
 
-    const verts = [];
-    const indices = [];
+    const cubeVerts = [];
+    const cubeIndices = [];
     for (let f = 0; f < 6; f++) {
-      const c = faceColors[f];
+      const c = faceColors[f], n = faceNormals[f];
       for (let v = 0; v < 4; v++) {
-        verts.push(...faceVerts[f * 4 + v], ...c);
+        cubeVerts.push(...faceVerts[f][v], ...n, ...c);
       }
       const o = f * 4;
-      indices.push(o, o+1, o+2, o, o+2, o+3);
+      cubeIndices.push(o, o+1, o+2, o, o+2, o+3);
     }
 
-    const vbo = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+    const cubeVBO = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeVerts), gl.STATIC_DRAW);
 
-    const ibo = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+    const cubeIBO = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(cubeIndices), gl.STATIC_DRAW);
 
-    const stride = 6 * 4;
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
-    gl.enableVertexAttribArray(aColor);
-    gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, stride, 12);
+    // --- Grid geometry ---
+    const gridVerts = [];
+    const gridSize = 20, gridStep = 1;
+    for (let i = -gridSize; i <= gridSize; i += gridStep) {
+      const bright = (i === 0) ? 0.4 : 0.15;
+      gridVerts.push(i, 0, -gridSize, 0, 1, 0, bright, bright, bright);
+      gridVerts.push(i, 0,  gridSize, 0, 1, 0, bright, bright, bright);
+      gridVerts.push(-gridSize, 0, i, 0, 1, 0, bright, bright, bright);
+      gridVerts.push( gridSize, 0, i, 0, 1, 0, bright, bright, bright);
+    }
+    const gridVBO = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, gridVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(gridVerts), gl.STATIC_DRAW);
+    const gridVertCount = gridVerts.length / 9;
+
+    const stride = 9 * 4;
+
+    function bindAttribs() {
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+      gl.enableVertexAttribArray(aNormal);
+      gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, stride, 12);
+      gl.enableVertexAttribArray(aColor);
+      gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, stride, 24);
+    }
 
     gl.enable(gl.DEPTH_TEST);
-    gl.clearColor(0.08, 0.08, 0.12, 1);
+    gl.clearColor(0.06, 0.06, 0.1, 1);
 
     // --- Math helpers ---
-    function mat4() { const m = new Float32Array(16); m[0]=m[5]=m[10]=m[15]=1; return m; }
+    function identity() { const m = new Float32Array(16); m[0]=m[5]=m[10]=m[15]=1; return m; }
+
+    function translate(x, y, z) {
+      const m = identity();
+      m[12]=x; m[13]=y; m[14]=z;
+      return m;
+    }
 
     function perspective(fov, aspect, near, far) {
       const f = 1 / Math.tan(fov / 2);
@@ -154,50 +199,69 @@
     }
 
     // --- Camera (free look + WASD/ZQSD) ---
-    let camYaw = 0.5, camPitch = 0.4;
-    const camPos = [0, 0, 5];
-    const moveSpeed = 0.03;
+    let camYaw = 0.5, camPitch = 0.3;
+    const camPos = [3, 2, 5];
+    const velocity = [0, 0, 0];
+    const accel = 12.0;
+    const friction = 6.0;
     let dragging = false, lastX = 0, lastY = 0;
     const keys = {};
+    let lastTime = performance.now();
 
-    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); });
     window.addEventListener('keyup', e => keys[e.code] = false);
 
     canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
     window.addEventListener('mouseup', () => dragging = false);
     window.addEventListener('mousemove', e => {
       if (!dragging) return;
-      camYaw += (e.clientX - lastX) * 0.008;
-      camPitch += (e.clientY - lastY) * 0.008;
+      camYaw += (e.clientX - lastX) * 0.005;
+      camPitch += (e.clientY - lastY) * 0.005;
       camPitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, camPitch));
       lastX = e.clientX;
       lastY = e.clientY;
     });
     canvas.addEventListener('wheel', e => {
       const fwd = [-Math.sin(camYaw) * Math.cos(camPitch), Math.sin(camPitch), -Math.cos(camYaw) * Math.cos(camPitch)];
-      const d = -e.deltaY * 0.005;
+      const d = -e.deltaY * 0.01;
       camPos[0] += fwd[0] * d; camPos[1] += fwd[1] * d; camPos[2] += fwd[2] * d;
       e.preventDefault();
     }, { passive: false });
 
-    function processMovement() {
+    function processMovement(dt) {
       const forward = [-Math.sin(camYaw), 0, -Math.cos(camYaw)];
       const right = [Math.cos(camYaw), 0, -Math.sin(camYaw)];
 
-      // W/Z = forward, S = backward
-      if (keys['KeyW'] || keys['KeyZ']) { camPos[0] += forward[0]*moveSpeed; camPos[2] += forward[2]*moveSpeed; }
-      if (keys['KeyS']) { camPos[0] -= forward[0]*moveSpeed; camPos[2] -= forward[2]*moveSpeed; }
-      // D = right, A/Q = left
-      if (keys['KeyD']) { camPos[0] += right[0]*moveSpeed; camPos[2] += right[2]*moveSpeed; }
-      if (keys['KeyA'] || keys['KeyQ']) { camPos[0] -= right[0]*moveSpeed; camPos[2] -= right[2]*moveSpeed; }
-      // Space / Shift = up / down
-      if (keys['Space']) camPos[1] += moveSpeed;
-      if (keys['ShiftLeft'] || keys['ShiftRight']) camPos[1] -= moveSpeed;
+      let ax = 0, ay = 0, az = 0;
+      if (keys['KeyW'] || keys['KeyZ']) { ax += forward[0]; az += forward[2]; }
+      if (keys['KeyS']) { ax -= forward[0]; az -= forward[2]; }
+      if (keys['KeyD']) { ax += right[0]; az += right[2]; }
+      if (keys['KeyA'] || keys['KeyQ']) { ax -= right[0]; az -= right[2]; }
+      if (keys['Space']) ay += 1;
+      if (keys['ShiftLeft'] || keys['ShiftRight']) ay -= 1;
+
+      const len = Math.hypot(ax, az);
+      if (len > 0) { ax /= len; az /= len; }
+
+      velocity[0] += ax * accel * dt;
+      velocity[1] += ay * accel * dt;
+      velocity[2] += az * accel * dt;
+
+      const damp = Math.exp(-friction * dt);
+      velocity[0] *= damp;
+      velocity[1] *= damp;
+      velocity[2] *= damp;
+
+      camPos[0] += velocity[0] * dt;
+      camPos[1] += velocity[1] * dt;
+      camPos[2] += velocity[2] * dt;
     }
 
     // --- Render loop ---
-    function frame() {
-      processMovement();
+    function frame(now) {
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+      processMovement(dt);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
       const target = [
@@ -206,14 +270,29 @@
         camPos[2] - Math.cos(camYaw) * Math.cos(camPitch),
       ];
 
-      const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.1, 100);
+      const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.1, 200);
       const view = lookAt(camPos, target, [0, 1, 0]);
-      gl.uniformMatrix4fv(uMVP, false, mulMat4(proj, view));
+      const vp = mulMat4(proj, view);
+      gl.uniformMatrix4fv(uVP, false, vp);
+      gl.uniform3f(uLightDir, 0.5, 0.8, 0.3);
+      gl.uniform3f(uViewPos, camPos[0], camPos[1], camPos[2]);
 
+      // Draw grid
+      gl.bindBuffer(gl.ARRAY_BUFFER, gridVBO);
+      bindAttribs();
+      gl.uniformMatrix4fv(uModel, false, translate(0, -1, 0));
+      gl.drawArrays(gl.LINES, 0, gridVertCount);
+
+      // Draw cube
+      gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
+      bindAttribs();
+      gl.uniformMatrix4fv(uModel, false, translate(0, 0, 0));
       gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0);
+
       requestAnimationFrame(frame);
     }
-    frame();
+    requestAnimationFrame(frame);
   </script>
 </body>
 </html>
